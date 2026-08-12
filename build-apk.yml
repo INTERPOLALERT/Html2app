@@ -1,6 +1,5 @@
 name: Build Web2App APK
 
-# Runs on every push, and on demand from the Actions tab.
 on:
   push:
     branches: [ main, master ]
@@ -13,6 +12,12 @@ jobs:
     steps:
       - name: Get the source
         uses: actions/checkout@v4
+
+      - name: Unzip the project
+        run: |
+          unzip -o web2app-container.zip -d .
+          echo "Contents after unzip:"
+          find container -maxdepth 2
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -28,12 +33,9 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      # A signing key is required or Android refuses to install the result.
-      # If you have added a keystore as a repository secret it is used, so
-      # updates install over the top of an existing copy. Otherwise a fresh key
-      # is generated, which installs fine but counts as a different app.
       - name: Prepare the signing key
         id: signing
+        working-directory: container
         run: |
           if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
             echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
@@ -55,18 +57,17 @@ jobs:
           fi
 
       - name: Build the release APK
+        working-directory: container
         run: |
           gradle assembleRelease --no-daemon --stacktrace \
-            -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/release.jks \
+            -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/container/release.jks \
             -Pandroid.injected.signing.store.password=${{ steps.signing.outputs.store_pass }} \
             -Pandroid.injected.signing.key.alias=${{ steps.signing.outputs.key_alias }} \
             -Pandroid.injected.signing.key.password=${{ steps.signing.outputs.key_pass }}
 
-      # Android 11 and newer refuse to install anything without a v2 signature,
-      # so fail loudly here rather than on the phone.
       - name: Verify the signature
         run: |
-          APK=$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          APK=$(find container/app/build/outputs/apk/release -name '*.apk' | head -n 1)
           echo "Checking $APK"
           BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
           "$BUILD_TOOLS/apksigner" verify --verbose "$APK"
@@ -77,6 +78,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Web2App-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: container/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 90
