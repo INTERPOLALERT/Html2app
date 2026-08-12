@@ -1,0 +1,84 @@
+name: Build Web2App APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      - name: Unzip the project
+        run: |
+          unzip -o web2app-container.zip -d .
+          echo "Contents after unzip:"
+          find container -maxdepth 2
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare the signing key
+        id: signing
+        working-directory: container
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
+            echo "store_pass=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_OUTPUT"
+            echo "key_pass=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_OUTPUT"
+            echo "key_alias=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_OUTPUT"
+            echo "Using the keystore from repository secrets."
+          else
+            keytool -genkeypair -v \
+              -keystore release.jks \
+              -alias web2app \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass web2appkey -keypass web2appkey \
+              -dname "CN=Web2App, OU=Personal, O=Personal, L=None, ST=None, C=US"
+            echo "store_pass=web2appkey" >> "$GITHUB_OUTPUT"
+            echo "key_pass=web2appkey" >> "$GITHUB_OUTPUT"
+            echo "key_alias=web2app" >> "$GITHUB_OUTPUT"
+            echo "::warning::No KEYSTORE_BASE64 secret found, so a throwaway key was generated. Add the secret if you want future builds to install as updates."
+          fi
+
+      - name: Build the release APK
+        working-directory: container
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace \
+            -Pandroid.injected.signing.store.file=$GITHUB_WORKSPACE/container/release.jks \
+            -Pandroid.injected.signing.store.password=${{ steps.signing.outputs.store_pass }} \
+            -Pandroid.injected.signing.key.alias=${{ steps.signing.outputs.key_alias }} \
+            -Pandroid.injected.signing.key.password=${{ steps.signing.outputs.key_pass }}
+
+      - name: Verify the signature
+        run: |
+          APK=$(find container/app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          echo "Checking $APK"
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
+          "$BUILD_TOOLS/apksigner" verify --verbose "$APK"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$APK" | grep -q "v2 scheme (APK Signature Scheme v2): true"
+          echo "v2 signature present."
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Web2App-apk
+          path: container/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 90
+
